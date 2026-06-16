@@ -1,0 +1,102 @@
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: Arial, sans-serif;
+  background: #f4f6f8;
+  color: #1f2933;
+}
+
+.shell {
+  width: min(980px, calc(100vw - 32px));
+  margin: 32px auto;
+}
+
+.panel {
+  background: #ffffff;
+  border: 1px solid #d9e2ec;
+  border-radius: 8px;
+  padding: 24px;
+}
+
+h1 {
+  margin: 0 0 20px;
+  font-size: 26px;
+}
+
+form {
+  display: grid;
+  gap: 16px;
+}
+
+fieldset {
+  display: grid;
+  gap: 16px;
+  margin: 0;
+  padding: 16px;
+  border: 1px solid #d9e2ec;
+  border-radius: 6px;
+}
+
+legend {
+  padding: 0 6px;
+  font-weight: 700;
+}
+
+label {
+  display: grid;
+  gap: 8px;
+  font-weight: 700;
+}
+
+input {
+  width: 100%;
+  padding: 10px;
+  border: 1px solid #bcccdc;
+  border-radius: 6px;
+  font: inherit;
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+button {
+  justify-self: start;
+  padding: 10px 16px;
+  border: 0;
+  border-radius: 6px;
+  background: #1f4e78;
+  color: #ffffff;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.review-panel {
+  margin-top: 20px;
+  padding: 16px;
+  border: 1px solid #d9e2ec;
+  border-radius: 6px;
+  background: #fbfdff;
+}
+
+.review-panel h2 {
+  margin: 0 0 10px;
+  font-size: 18px;
+}
+
+#warning-list {
+  display: grid;
+  gap: 8px;
+  margin: 12px 0 0;
+  padding-left: 20px;
+}
+
+#status {
+  min-height: 24px;
+  margin: 16px 0 0;
+}
