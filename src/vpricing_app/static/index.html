@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Quote Comparison</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <section class="panel">
+        <h1>Quote Comparison</h1>
+        <form id="upload-form">
+          <label>
+            Original BQ workbook
+            <input id="original" name="original" type="file" accept=".xlsx" />
+          </label>
+          <label>
+            Vendor quote files
+            <input id="vendors" name="vendors" type="file" accept=".xlsx,.xls,.pdf" multiple required />
+          </label>
+          <label>
+            Vendor names, comma separated in upload order
+            <input id="vendor-names" name="vendor_names" type="text" placeholder="Rensar, E-Tech, Rich" />
+          </label>
+          <fieldset>
+            <legend>Update existing comparison</legend>
+            <label>
+              Existing generated comparison workbook
+              <input id="existing-comparison" name="existing_comparison" type="file" accept=".xlsx" />
+            </label>
+            <label>
+              Revised vendor name
+              <input id="revised-vendor-name" name="revised_vendor_name" type="text" placeholder="Rich" />
+            </label>
+            <label>
+              Revised vendor revision/date
+              <input id="revision" name="revision" type="text" placeholder="R2 or 2026-06-16" />
+            </label>
+          </fieldset>
+          <div class="actions">
+            <button id="preview-button" type="button">Preview Warnings</button>
+            <button type="submit">Generate Workbook</button>
+          </div>
+        </form>
+        <section id="review-panel" class="review-panel" aria-live="polite">
+          <h2>Review</h2>
+          <div id="review-summary">Preview warnings before generating the workbook.</div>
+          <ul id="warning-list"></ul>
+        </section>
+        <p id="status" role="status"></p>
+      </section>
+    </main>
+    <script src="/app.js"></script>
+  </body>
+</html>
