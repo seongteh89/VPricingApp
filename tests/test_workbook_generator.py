@@ -30,6 +30,7 @@ def test_export_workbook_contains_vendor_blocks_summary_and_metadata(tmp_path):
     original_line = QuoteLine(
         package="Package 1",
         section="A",
+        section_description="ADDRESSABLE FIRE ALARM SYSTEM",
         item_no="1",
         description="Sub Alarm Panel",
         quantity=Decimal("5"),
@@ -52,7 +53,7 @@ def test_export_workbook_contains_vendor_blocks_summary_and_metadata(tmp_path):
     output_path = export_comparison_workbook(model, tmp_path)
 
     assert output_path.name == "Quote Comparison - Sample Project - Rich.xlsx"
-    wb = load_workbook(output_path, data_only=True)
+    wb = load_workbook(output_path, data_only=False)
     assert "Summary" in wb.sheetnames
     assert "Package 1" in wb.sheetnames
     assert "Change Log" in wb.sheetnames
@@ -67,6 +68,11 @@ def test_export_workbook_contains_vendor_blocks_summary_and_metadata(tmp_path):
     assert summary["B7"].value == "Total Package Amount"
     assert summary["C7"].value == 100
     package = wb["Package 1"]
+    assert package["A2"].value == "A"
+    assert package["B2"].value == "ADDRESSABLE FIRE ALARM SYSTEM"
+    assert package["J2"].value == "=SUM(J3:J3)"
+    assert package["K2"].value == "=SUM(K3:K3)"
+    assert package["L2"].value == "=SUM(L3:L3)"
     assert package.cell(package.max_row, 1).value == "GRAND TOTAL"
     assert package.cell(package.max_row, 10).value == 0
     assert package.cell(package.max_row, 11).value == 0
@@ -75,6 +81,51 @@ def test_export_workbook_contains_vendor_blocks_summary_and_metadata(tmp_path):
     metadata = load_comparison_metadata(output_path)
     assert metadata.project_name == "Sample Project"
     assert metadata.vendors[0].vendor_name == "Rich"
+
+
+def test_export_workbook_section_subtotal_formulas_cover_each_vendor(tmp_path):
+    original_line = QuoteLine(
+        package="Package 1",
+        section="A",
+        section_description="ADDRESSABLE FIRE ALARM SYSTEM",
+        item_no="1",
+        description="Sub Alarm Panel",
+        quantity=Decimal("5"),
+        revised_quantity=Decimal("5"),
+        unit="Nos",
+    )
+    rich_line = original_line.model_copy(
+        update={"labor_rate": Decimal("20"), "labor_total": Decimal("100"), "total": Decimal("100")}
+    )
+    rensar_line = original_line.model_copy(
+        update={"labor_rate": Decimal("30"), "labor_total": Decimal("150"), "total": Decimal("150")}
+    )
+    original = OriginalBQ(project_name="Sample Project", source_filename="original.xlsx", packages={"Package 1": [original_line]})
+    rich = VendorQuote(
+        vendor_name="Rich",
+        source_filename="rich.pdf",
+        source_type=SourceType.PDF,
+        packages={"Package 1": [rich_line]},
+        package_totals={"Package 1": Money(total=Decimal("100"))},
+    )
+    rensar = VendorQuote(
+        vendor_name="Rensar",
+        source_filename="rensar.pdf",
+        source_type=SourceType.PDF,
+        packages={"Package 1": [rensar_line]},
+        package_totals={"Package 1": Money(total=Decimal("150"))},
+    )
+    model = ComparisonModel(project_name="Sample Project", original=original, vendors=[rich, rensar])
+
+    output_path = export_comparison_workbook(model, tmp_path)
+
+    package = load_workbook(output_path, data_only=False)["Package 1"]
+    assert package["J2"].value == "=SUM(J3:J3)"
+    assert package["K2"].value == "=SUM(K3:K3)"
+    assert package["L2"].value == "=SUM(L3:L3)"
+    assert package["R2"].value == "=SUM(R3:R3)"
+    assert package["S2"].value == "=SUM(S3:S3)"
+    assert package["T2"].value == "=SUM(T3:T3)"
 
 
 def test_export_workbook_splits_large_metadata_across_rows(tmp_path):

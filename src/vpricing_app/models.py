@@ -50,6 +50,7 @@ class Money(BaseModel):
 class QuoteLine(BaseModel):
     package: str
     section: str | None = None
+    section_description: str | None = None
     item_no: str | None = None
     description: str
     quantity: Decimal | None = None

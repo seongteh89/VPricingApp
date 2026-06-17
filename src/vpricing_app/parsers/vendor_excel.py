@@ -27,6 +27,7 @@ def parse_vendor_excel(path: str | Path, vendor_name: str) -> VendorQuote:
             continue
 
         current_section: str | None = None
+        current_section_description: str | None = None
         lines: list[QuoteLine] = []
         for row_number in range(header_row + 1, ws.max_row + 1):
             item_no = ws.cell(row_number, 1).value
@@ -43,11 +44,13 @@ def parse_vendor_excel(path: str | Path, vendor_name: str) -> VendorQuote:
             description_text = str(description).strip()
             if isinstance(item_no, str) and len(item_no.strip()) == 1 and item_no.strip().isalpha():
                 current_section = item_no.strip()
+                current_section_description = description_text
                 continue
             lines.append(
                 QuoteLine(
                     package=ws.title,
                     section=current_section,
+                    section_description=current_section_description,
                     item_no=str(item_no).strip() if item_no is not None else None,
                     description=description_text,
                     quantity=parse_money(ws.cell(row_number, 3).value),

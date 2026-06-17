@@ -55,6 +55,7 @@ def parse_vendor_pdf(path: str | Path, vendor_name: str) -> VendorQuote:
     current_header: dict[int, str] = {}
     current_package: str | None = None
     current_section: str | None = None
+    current_section_description: str | None = None
 
     with pdfplumber.open(str(path)) as pdf:
         for page in pdf.pages:
@@ -91,11 +92,13 @@ def parse_vendor_pdf(path: str | Path, vendor_name: str) -> VendorQuote:
                     if item_no and len(item_no.strip()) == 1 and item_no.strip().isalpha():
                         current_package = package
                         current_section = item_no.strip()
+                        current_section_description = description
                         continue
                     current_package = package
                     line = QuoteLine(
                         package=package,
                         section=mapped.get("section") or current_section,
+                        section_description=current_section_description,
                         item_no=item_no,
                         description=description,
                         quantity=parse_money(mapped.get("quantity")),

@@ -7,9 +7,9 @@ from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
-from vpricing_app.models import ComparisonModel, Money, VendorQuote
+from vpricing_app.models import ComparisonModel, Money, QuoteLine, VendorQuote
 from vpricing_app.services.filename_builder import build_output_filename
-from vpricing_app.services.matcher import build_comparison_rows
+from vpricing_app.services.matcher import ComparisonRow, build_comparison_rows
 
 
 HEADER_FILL = PatternFill("solid", fgColor="FFFFFFFF")
@@ -100,6 +100,52 @@ def _style_data_row(ws, row_number: int, vendor_count: int) -> None:
             _style_money_cell(ws.cell(row_number, col))
 
 
+def _reference_line(row: ComparisonRow) -> QuoteLine | None:
+    if row.original_line:
+        return row.original_line
+    return next(iter(row.vendor_lines.values()), None)
+
+
+def _section_key(row: ComparisonRow) -> tuple[str, str] | None:
+    line = _reference_line(row)
+    if not line or not line.section:
+        return None
+    return line.section, line.section_description or ""
+
+
+def _write_section_subtotal_row(ws, section_key: tuple[str, str], vendor_count: int) -> int:
+    section, description = section_key
+    values = [section, description, "", "", ""]
+    for _ in range(vendor_count):
+        values.extend(["", "", "", "", "", "", "", ""])
+    ws.append(values)
+    row_number = ws.max_row
+    for cell in ws[row_number]:
+        cell.font = Font(bold=True)
+        cell.fill = TOTAL_FILL
+        cell.border = THIN_BORDER
+    return row_number
+
+
+def _write_section_subtotal_formulas(
+    ws,
+    subtotal_row: int | None,
+    first_item_row: int | None,
+    last_item_row: int | None,
+    vendor_count: int,
+) -> None:
+    if subtotal_row is None or first_item_row is None or last_item_row is None:
+        return
+    for vendor_index in range(vendor_count):
+        start_col = _vendor_block_start(vendor_index)
+        for col in (start_col + 4, start_col + 5, start_col + 6):
+            column_letter = get_column_letter(col)
+            cell = ws.cell(subtotal_row, col)
+            cell.value = f"=SUM({column_letter}{first_item_row}:{column_letter}{last_item_row})"
+            cell.font = Font(bold=True)
+            _style_money_cell(cell, TOTAL_FILL)
+
+
 def _write_summary(summary, model: ComparisonModel) -> None:
     summary.append(["Vendor", "Grand Total"])
     for cell in summary[1]:
@@ -178,7 +224,23 @@ def export_comparison_workbook(model: ComparisonModel, output_dir: str | Path, r
     for package_name, rows in rows_by_package.items():
         ws = wb.create_sheet(package_name[:31])
         _write_headers(ws, [vendor.vendor_name for vendor in model.vendors])
+        current_section_key: tuple[str, str] | None = None
+        subtotal_row: int | None = None
+        first_item_row: int | None = None
+        last_item_row: int | None = None
         for row in rows:
+            section_key = _section_key(row)
+            if section_key != current_section_key:
+                _write_section_subtotal_formulas(
+                    ws, subtotal_row, first_item_row, last_item_row, len(model.vendors)
+                )
+                current_section_key = section_key
+                subtotal_row = None
+                first_item_row = None
+                last_item_row = None
+                if section_key is not None:
+                    subtotal_row = _write_section_subtotal_row(ws, section_key, len(model.vendors))
+
             original = row.original_line
             first_vendor_line = next(iter(row.vendor_lines.values()), None)
             values = [
@@ -220,6 +282,10 @@ def export_comparison_workbook(model: ComparisonModel, output_dir: str | Path, r
                     if total == lowest:
                         total_col = 5 + index * 8 + 7
                         ws.cell(ws.max_row, total_col).fill = LOW_FILL
+            if current_section_key is not None:
+                first_item_row = first_item_row or ws.max_row
+                last_item_row = ws.max_row
+        _write_section_subtotal_formulas(ws, subtotal_row, first_item_row, last_item_row, len(model.vendors))
         _write_package_total_row(ws, package_name, model.vendors)
         _autosize(ws)
 
