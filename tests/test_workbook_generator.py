@@ -59,6 +59,19 @@ def test_export_workbook_contains_vendor_blocks_summary_and_metadata(tmp_path):
     assert "Import Warnings" in wb.sheetnames
     assert "System Metadata" in wb.sheetnames
     assert wb["System Metadata"].sheet_state == "hidden"
+    summary = wb["Summary"]
+    assert summary["B4"].value == "show Total Amount of each Vendor"
+    assert summary["C5"].value == "Rich"
+    assert summary["B6"].value == "package 1"
+    assert summary["C6"].value == 100
+    assert summary["B7"].value == "Total Package Amount"
+    assert summary["C7"].value == 100
+    package = wb["Package 1"]
+    assert package.cell(package.max_row, 1).value == "GRAND TOTAL"
+    assert package.cell(package.max_row, 10).value == 0
+    assert package.cell(package.max_row, 11).value == 0
+    assert package.cell(package.max_row, 12).value == 100
+    assert package.cell(package.max_row, 12).fill.fgColor.rgb == "FFD9D9D9"
     metadata = load_comparison_metadata(output_path)
     assert metadata.project_name == "Sample Project"
     assert metadata.vendors[0].vendor_name == "Rich"
