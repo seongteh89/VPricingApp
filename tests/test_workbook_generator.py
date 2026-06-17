@@ -4,7 +4,9 @@ from openpyxl import load_workbook
 
 from vpricing_app.models import ComparisonModel, Money, OriginalBQ, QuoteLine, SourceType, VendorQuote
 from vpricing_app.services.filename_builder import build_output_filename
-from vpricing_app.services.comparison_service import replace_vendor_quote
+from vpricing_app.parsers.original_bq import parse_original_bq
+from vpricing_app.parsers.vendor_excel import parse_vendor_excel
+from vpricing_app.services.comparison_service import build_new_comparison, replace_vendor_quote
 from vpricing_app.services.workbook_generator import export_comparison_workbook, load_comparison_metadata
 
 
@@ -126,6 +128,21 @@ def test_export_workbook_section_subtotal_formulas_cover_each_vendor(tmp_path):
     assert package["R2"].value == "=SUM(R3:R3)"
     assert package["S2"].value == "=SUM(S3:S3)"
     assert package["T2"].value == "=SUM(T3:T3)"
+
+
+def test_export_workbook_creates_request_for_quotation_sheet(tmp_path, sample_original_rfq, sample_vendor_rfq):
+    original = parse_original_bq(sample_original_rfq)
+    vendor = parse_vendor_excel(sample_vendor_rfq, "T-Tech")
+    model = build_new_comparison(original, [vendor])
+
+    output_path = export_comparison_workbook(model, tmp_path)
+
+    wb = load_workbook(output_path, data_only=False)
+    assert "Request For Quotation" in wb.sheetnames
+    sheet = wb["Request For Quotation"]
+    assert sheet["B2"].value == "PBB : Automatic Fire Sprinkler System"
+    assert sheet.cell(sheet.max_row, 1).value == "GRAND TOTAL"
+    assert sheet.cell(sheet.max_row, 12).value == 37090.8
 
 
 def test_export_workbook_splits_large_metadata_across_rows(tmp_path):

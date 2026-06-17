@@ -78,6 +78,137 @@ def sample_vendor_excel(tmp_path: Path) -> Path:
 
 
 @pytest.fixture
+def sample_original_rfq(tmp_path: Path) -> Path:
+    path = tmp_path / "SIN12 RFQ Original.xlsx"
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Request For Quotation"
+    ws.append([])
+    ws.append([])
+    ws.append([])
+    ws.append([None, None, "Request for Quotation"])
+    ws.append([])
+    ws.append([None, "Equipment     :", None, "Fire Alarm System "])
+    for _ in range(6):
+        ws.append([])
+    ws.append([None, None, None, None, None, None, "Year 1", None, None, "Year 2", None, None, "Year 3", None, "Total Amount"])
+    ws.append([None, None, None, None, None, None, "Jan - Dec 2027", None, None, "Jan - Dec 2028", None, None, "Jan - Dec 2029"])
+    ws.append(
+        [
+            None,
+            "No.",
+            "Description",
+            None,
+            "Quantity",
+            "Number of Servicing",
+            "Unit Price",
+            "Amount",
+            "Number of Servicing",
+            "Unit Price",
+            "Amount",
+            "Number of Servicing",
+            "Unit Price",
+            "Amount",
+        ]
+    )
+    ws.append([])
+    ws.append([None, None, "Preventive Maintenance"])
+    ws.append([])
+    ws.append([])
+    ws.append([])
+    ws.append([])
+    ws.append([None, None, "PBB : Automatic Fire Sprinkler System", None, "1 Lot", 12])
+    ws.append([None, None, "PBB : Fire Alarm System (Addressable)", None, 2, 12])
+    ws.append([])
+    ws.append([None, "Total", None, None, None, None, None, 0, None, None, 0, None, None, 0])
+    wb.save(path)
+    return path
+
+
+@pytest.fixture
+def sample_vendor_rfq(tmp_path: Path) -> Path:
+    path = tmp_path / "SIN12 RFQ T-Tech.xlsx"
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Request For Quotation"
+    ws.append([])
+    ws.append([])
+    ws.append([])
+    ws.append([None, None, "Request for Quotation"])
+    ws.append([])
+    ws.append([None, "Equipment     :", None, "Fire Alarm System "])
+    for _ in range(6):
+        ws.append([])
+    ws.append([None, None, None, None, None, None, "Year 1", None, None, "Year 2", None, None, "Year 3", None, "Total Amount"])
+    ws.append([None, None, None, None, None, None, "Jan - Dec 2027", None, None, "Jan - Dec 2028", None, None, "Jan - Dec 2029"])
+    ws.append(
+        [
+            None,
+            "No.",
+            "Description",
+            None,
+            "Quantity",
+            "Number of Servicing",
+            "Unit Price",
+            "Amount",
+            "Number of Servicing",
+            "Unit Price",
+            "Amount",
+            "Number of Servicing",
+            "Unit Price",
+            "Amount",
+        ]
+    )
+    ws.append([])
+    ws.append([None, None, "Preventive Maintenance"])
+    ws.append([])
+    ws.append([])
+    ws.append([])
+    ws.append([])
+    ws.append(
+        [
+            None,
+            None,
+            "PBB : Automatic Fire Sprinkler System",
+            None,
+            "1 Lot",
+            12,
+            600,
+            7200,
+            12,
+            618,
+            7416,
+            12,
+            636.54,
+            7638.48,
+        ]
+    )
+    ws.append(
+        [
+            None,
+            None,
+            "PBB : Fire Alarm System (Addressable)",
+            None,
+            2,
+            12,
+            400,
+            4800,
+            12,
+            412,
+            4944,
+            12,
+            424.36,
+            5092.32,
+        ]
+    )
+    ws.append([None, None, "Unpriced child location", None, None, None, None, 0, None, None, 0, None, None, 0])
+    ws.append([])
+    ws.append([None, "Total", None, None, None, None, None, 12000, None, None, 12360, None, None, 12730.8])
+    wb.save(path)
+    return path
+
+
+@pytest.fixture
 def sample_vendor_pdf(tmp_path: Path) -> Path:
     from reportlab.lib import colors
     from reportlab.lib.pagesizes import landscape, A4
