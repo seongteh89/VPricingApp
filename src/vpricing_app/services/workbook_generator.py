@@ -1,5 +1,6 @@
 import json
 import re
+from copy import copy
 from decimal import Decimal
 from pathlib import Path
 
@@ -14,6 +15,7 @@ from vpricing_app.parsers.original_bq import (
     _find_header_row,
     _first_header_column,
     _header_columns,
+    _normalize_header,
 )
 from vpricing_app.services.filename_builder import build_output_filename
 from vpricing_app.services.matcher import ComparisonRow, build_comparison_rows
@@ -215,31 +217,6 @@ def _autosize(ws) -> None:
         ws.column_dimensions[get_column_letter(column[0].column)].width = min(max(width + 2, 10), 45)
 
 
-def _safe_sheet_title(base_title: str, existing_titles: set[str]) -> str:
-    cleaned = re.sub(r"[\[\]\*\?/\\:]", " ", base_title).strip() or "Sheet"
-    title = cleaned[:31]
-    counter = 1
-    while title in existing_titles:
-        suffix = f" {counter}"
-        title = f"{cleaned[: 31 - len(suffix)]}{suffix}"
-        counter += 1
-    existing_titles.add(title)
-    return title
-
-
-def _vendor_template_title(package_name: str, vendor_name: str, existing_titles: set[str]) -> str:
-    package_number = _package_number(package_name)
-    if package_number is not None:
-        return _safe_sheet_title(f"Package {package_number} - {vendor_name}", existing_titles)
-    preferred = f"{package_name} - {vendor_name}"
-    if len(preferred) <= 31:
-        return _safe_sheet_title(preferred, existing_titles)
-    abbreviated_package = re.sub(r"\bRequest\s+For\s+Quotation\b", "RFQ", package_name, flags=re.IGNORECASE)
-    abbreviated_package = re.sub(r"\bQuotation\b", "Quote", abbreviated_package, flags=re.IGNORECASE)
-    preferred = f"{abbreviated_package} - {vendor_name}"
-    return _safe_sheet_title(preferred, existing_titles)
-
-
 def _package_number(name: str) -> str | None:
     match = re.search(r"package\s*(\d+)", name, flags=re.IGNORECASE)
     return match.group(1) if match else None
@@ -274,11 +251,32 @@ def _worksheet_for_vendor_package(wb, package_name: str, vendor_name: str):
     return None
 
 
+def _first_total_amount_column(ws, header_row: int, start_column: int) -> int | None:
+    for row_number in range(1, header_row + 1):
+        for column in range(start_column, ws.max_column + 1):
+            if _normalize_header(ws.cell(row_number, column).value) == "total amount":
+                return column
+    return None
+
+
 def _pricing_columns(ws) -> list[int]:
     header_row = _find_header_row(ws)
     if header_row is None:
         return []
     headers = _header_columns(ws, header_row)
+    start_candidates = [
+        _first_header_column(headers, "revised quantity"),
+        _first_header_column(headers, "number of servicing"),
+    ]
+    start_columns = [column for column in start_candidates if column is not None]
+    if not start_columns:
+        return []
+    start_column = min(start_columns)
+
+    total_amount_column = _first_total_amount_column(ws, header_row, start_column)
+    if total_amount_column is not None:
+        return list(range(start_column, total_amount_column + 1))
+
     pricing_candidates = [
         _first_header_column(headers, "revised quantity"),
         _first_header_column(headers, "unit"),
@@ -294,7 +292,20 @@ def _pricing_columns(ws) -> list[int]:
     columns = [column for column in pricing_candidates if column is not None]
     if not columns:
         return []
-    return list(range(min(columns), max(columns) + 1))
+    columns = [column for column in columns if column >= start_column]
+    return list(range(start_column, max(columns) + 1))
+
+
+def _columns_in_block(headers: dict[str, list[int]], block_columns: set[int], *names: str) -> list[int]:
+    columns: list[int] = []
+    for name in names:
+        columns.extend(column for column in headers.get(name, []) if column in block_columns)
+    return columns
+
+
+def _first_column_in_block(headers: dict[str, list[int]], block_columns: set[int], *names: str) -> int | None:
+    columns = _columns_in_block(headers, block_columns, *names)
+    return columns[0] if columns else None
 
 
 def _pricing_column_map(ws) -> dict[str, int | list[int] | None]:
@@ -302,18 +313,34 @@ def _pricing_column_map(ws) -> dict[str, int | list[int] | None]:
     if header_row is None:
         return {}
     headers = _header_columns(ws, header_row)
+    block_columns = set(_pricing_columns(ws))
     return {
-        "revised_quantity": _first_header_column(headers, "revised quantity", "number of servicing"),
-        "unit": _first_header_column(headers, "unit"),
-        "material_rate": _first_header_column(headers, "material rate"),
-        "labor_rate": _first_header_column(headers, "labor rate"),
-        "material_total": _first_header_column(headers, "total material cost", "material total"),
-        "labor_total": _first_header_column(headers, "total labor cost", "labor total"),
-        "total": _first_header_column(headers, "total cost", "total"),
-        "service_cols": _all_header_columns(headers, "number of servicing"),
-        "unit_price_cols": _all_header_columns(headers, "unit price"),
-        "amount_cols": _all_header_columns(headers, "amount"),
+        "revised_quantity": _first_column_in_block(headers, block_columns, "revised quantity", "number of servicing"),
+        "unit": _first_column_in_block(headers, block_columns, "unit"),
+        "material_rate": _first_column_in_block(headers, block_columns, "material rate"),
+        "labor_rate": _first_column_in_block(headers, block_columns, "labor rate"),
+        "material_total": _first_column_in_block(headers, block_columns, "total material cost", "material total"),
+        "labor_total": _first_column_in_block(headers, block_columns, "total labor cost", "labor total"),
+        "total": _first_column_in_block(headers, block_columns, "total cost", "total"),
+        "service_cols": _columns_in_block(headers, block_columns, "number of servicing"),
+        "unit_price_cols": _columns_in_block(headers, block_columns, "unit price"),
+        "amount_cols": _columns_in_block(headers, block_columns, "amount"),
     }
+
+
+def _shift_pricing_column(value: int | list[int] | None, offset: int) -> int | list[int] | None:
+    if isinstance(value, list):
+        return [column + offset for column in value]
+    if isinstance(value, int):
+        return value + offset
+    return value
+
+
+def _shift_pricing_map(
+    pricing_map: dict[str, int | list[int] | None],
+    offset: int,
+) -> dict[str, int | list[int] | None]:
+    return {key: _shift_pricing_column(value, offset) for key, value in pricing_map.items()}
 
 
 def _write_cell_if_column(ws, row_number: int, column: int | None, value) -> None:
@@ -346,20 +373,133 @@ def _write_parsed_pricing(target_ws, target_row: int, line: QuoteLine, pricing_m
     _write_cell_if_column(target_ws, target_row, pricing_map.get("total"), line.total)
 
 
-def _copy_pricing_cell(source_ws, source_row: int, target_ws, target_row: int, column: int) -> None:
-    source = source_ws.cell(source_row, column)
-    target = target_ws.cell(target_row, column)
-    if isinstance(source.value, str) and source.value.startswith("="):
+def _translated_cell_value(value, source_coordinate: str, target_coordinate: str):
+    if isinstance(value, str) and value.startswith("="):
         try:
-            target.value = Translator(source.value, origin=source.coordinate).translate_formula(target.coordinate)
+            return Translator(value, origin=source_coordinate).translate_formula(target_coordinate)
         except Exception:
-            target.value = source.value
-    else:
-        target.value = source.value
+            return value
+    return value
 
 
-def _copy_vendor_pricing(source_ws, target_ws, rows: list[ComparisonRow], vendor: VendorQuote, pricing_columns: list[int]) -> None:
-    pricing_map = _pricing_column_map(target_ws)
+def _copy_template_cell(source, target) -> None:
+    target.value = _translated_cell_value(source.value, source.coordinate, target.coordinate)
+    if source.has_style:
+        target._style = copy(source._style)
+    if source.hyperlink:
+        target._hyperlink = copy(source.hyperlink)
+    if source.comment:
+        target.comment = copy(source.comment)
+
+
+def _copy_pricing_cell(source_ws, source_row: int, target_ws, target_row: int, source_column: int, target_column: int) -> None:
+    source = source_ws.cell(source_row, source_column)
+    target = target_ws.cell(target_row, target_column)
+    target.value = _translated_cell_value(source.value, source.coordinate, target.coordinate)
+
+
+def _vendor_pricing_columns(pricing_columns: list[int], vendor_index: int) -> list[int]:
+    offset = vendor_index * len(pricing_columns)
+    return [column + offset for column in pricing_columns]
+
+
+def _merged_range_overlaps(ws, min_col: int, min_row: int, max_col: int, max_row: int) -> bool:
+    for merged_range in ws.merged_cells.ranges:
+        existing_min_col, existing_min_row, existing_max_col, existing_max_row = merged_range.bounds
+        columns_overlap = min_col <= existing_max_col and max_col >= existing_min_col
+        rows_overlap = min_row <= existing_max_row and max_row >= existing_min_row
+        if columns_overlap and rows_overlap:
+            return True
+    return False
+
+
+def _merge_range_if_possible(ws, min_col: int, min_row: int, max_col: int, max_row: int) -> None:
+    if min_col == max_col and min_row == max_row:
+        return
+    if _merged_range_overlaps(ws, min_col, min_row, max_col, max_row):
+        return
+    ws.merge_cells(
+        start_row=min_row,
+        start_column=min_col,
+        end_row=max_row,
+        end_column=max_col,
+    )
+
+
+def _copy_pricing_block(ws, source_columns: list[int], target_columns: list[int]) -> None:
+    if not source_columns or not target_columns:
+        return
+    offset = target_columns[0] - source_columns[0]
+    for source_column, target_column in zip(source_columns, target_columns, strict=True):
+        source_letter = get_column_letter(source_column)
+        target_letter = get_column_letter(target_column)
+        source_dimension = ws.column_dimensions[source_letter]
+        target_dimension = ws.column_dimensions[target_letter]
+        target_dimension.width = source_dimension.width
+        target_dimension.hidden = source_dimension.hidden
+        target_dimension.outlineLevel = source_dimension.outlineLevel
+        for row_number in range(1, ws.max_row + 1):
+            _copy_template_cell(ws.cell(row_number, source_column), ws.cell(row_number, target_column))
+
+    first_source_column = min(source_columns)
+    last_source_column = max(source_columns)
+    for merged_range in list(ws.merged_cells.ranges):
+        min_col, min_row, max_col, max_row = merged_range.bounds
+        if min_col < first_source_column or max_col > last_source_column:
+            continue
+        _merge_range_if_possible(ws, min_col + offset, min_row, max_col + offset, max_row)
+
+
+def _ensure_vendor_pricing_blocks(ws, pricing_columns: list[int], vendor_count: int) -> None:
+    if vendor_count <= 1 or not pricing_columns:
+        return
+    block_width = len(pricing_columns)
+    ws.insert_cols(max(pricing_columns) + 1, amount=(vendor_count - 1) * block_width)
+    for vendor_index in range(1, vendor_count):
+        _copy_pricing_block(ws, pricing_columns, _vendor_pricing_columns(pricing_columns, vendor_index))
+
+
+def _vendor_label_row(ws, target_columns: list[int]) -> int | None:
+    header_row = _find_header_row(ws)
+    if header_row is None or not target_columns:
+        return None
+    first_column = min(target_columns)
+    last_column = max(target_columns)
+    for row_number in range(header_row - 1, 0, -1):
+        first_value = ws.cell(row_number, first_column).value
+        other_values = [ws.cell(row_number, column).value for column in range(first_column + 1, last_column + 1)]
+        if first_value not in (None, "") and all(value in (None, "") for value in other_values):
+            return row_number
+    for row_number in range(header_row - 1, 0, -1):
+        values = [ws.cell(row_number, column).value for column in range(first_column, last_column + 1)]
+        if all(value in (None, "") for value in values):
+            return row_number
+    return max(header_row - 1, 1)
+
+
+def _write_vendor_block_label(ws, vendor_name: str, target_columns: list[int]) -> None:
+    label_row = _vendor_label_row(ws, target_columns)
+    if label_row is None:
+        return
+    first_column = min(target_columns)
+    last_column = max(target_columns)
+    cell = ws.cell(label_row, first_column)
+    cell.value = vendor_name
+    cell.font = Font(bold=True)
+    cell.alignment = Alignment(horizontal="center", vertical="center")
+    _merge_range_if_possible(ws, first_column, label_row, last_column, label_row)
+
+
+def _copy_vendor_pricing(
+    source_ws,
+    target_ws,
+    rows: list[ComparisonRow],
+    vendor: VendorQuote,
+    source_columns: list[int],
+    target_columns: list[int],
+) -> None:
+    offset = target_columns[0] - source_columns[0] if source_columns and target_columns else 0
+    pricing_map = _shift_pricing_map(_pricing_column_map(target_ws), offset)
     for row in rows:
         vendor_line = row.vendor_lines.get(vendor.vendor_name)
         if vendor_line is None:
@@ -367,12 +507,12 @@ def _copy_vendor_pricing(source_ws, target_ws, rows: list[ComparisonRow], vendor
         target_row = row.original_line.source_row if row.original_line and row.original_line.source_row else vendor_line.source_row
         if target_row is None:
             continue
-        if source_ws is not None and pricing_columns:
+        if source_ws is not None and source_columns and target_columns:
             if vendor_line.source_row is None:
                 _write_parsed_pricing(target_ws, target_row, vendor_line, pricing_map)
                 continue
-            for column in pricing_columns:
-                _copy_pricing_cell(source_ws, vendor_line.source_row, target_ws, target_row, column)
+            for source_column, target_column in zip(source_columns, target_columns, strict=True):
+                _copy_pricing_cell(source_ws, vendor_line.source_row, target_ws, target_row, source_column, target_column)
         else:
             _write_parsed_pricing(target_ws, target_row, vendor_line, pricing_map)
 
@@ -423,26 +563,25 @@ def _export_template_preserved_workbook(
     original_template_path: str | Path,
 ) -> Path:
     wb = load_workbook(original_template_path)
-    existing_titles = set(wb.sheetnames)
     rows_by_package = build_comparison_rows(model.original, model.vendors)
+    source_workbooks = {
+        vendor.vendor_name: load_workbook(vendor.source_path, data_only=False)
+        for vendor in model.vendors
+        if vendor.source_path and Path(vendor.source_path).suffix.lower() in {".xlsx", ".xlsm"}
+    }
 
     for package_name, rows in rows_by_package.items():
-        template_ws = _worksheet_for_package(wb, package_name)
-        if template_ws is None:
+        target_ws = _worksheet_for_package(wb, package_name)
+        if target_ws is None:
             continue
-        pricing_columns = _pricing_columns(template_ws)
-        for vendor in model.vendors:
-            vendor_ws = wb.copy_worksheet(template_ws)
-            vendor_ws.title = _vendor_template_title(package_name, vendor.vendor_name, existing_titles)
-            source_ws = None
-            if vendor.source_path:
-                vendor_wb = load_workbook(vendor.source_path, data_only=False)
-                source_ws = _worksheet_for_package(vendor_wb, package_name)
-            _copy_vendor_pricing(source_ws, vendor_ws, rows, vendor, pricing_columns)
-
-    for package_name in rows_by_package:
-        if package_name in wb.sheetnames:
-            del wb[package_name]
+        pricing_columns = _pricing_columns(target_ws)
+        _ensure_vendor_pricing_blocks(target_ws, pricing_columns, len(model.vendors))
+        for vendor_index, vendor in enumerate(model.vendors):
+            target_columns = _vendor_pricing_columns(pricing_columns, vendor_index)
+            _write_vendor_block_label(target_ws, vendor.vendor_name, target_columns)
+            source_wb = source_workbooks.get(vendor.vendor_name)
+            source_ws = _worksheet_for_package(source_wb, package_name) if source_wb is not None else None
+            _copy_vendor_pricing(source_ws, target_ws, rows, vendor, pricing_columns, target_columns)
 
     if "Summary" in wb.sheetnames:
         del wb["Summary"]
@@ -472,11 +611,20 @@ def export_updated_template_workbook(
     updated_any_sheet = False
 
     for package_name, rows in rows_by_package.items():
-        target_ws = _worksheet_for_vendor_package(wb, package_name, revised_vendor.vendor_name)
+        target_ws = _worksheet_for_package(wb, package_name)
+        if target_ws is None:
+            target_ws = _worksheet_for_vendor_package(wb, package_name, revised_vendor.vendor_name)
         if target_ws is None:
             continue
         source_ws = _worksheet_for_package(source_wb, package_name) if source_wb is not None else None
-        _copy_vendor_pricing(source_ws, target_ws, rows, revised_vendor, _pricing_columns(target_ws))
+        pricing_columns = _pricing_columns(target_ws)
+        vendor_index = next(
+            (index for index, vendor in enumerate(model.vendors) if vendor.vendor_name == revised_vendor.vendor_name),
+            0,
+        )
+        target_columns = _vendor_pricing_columns(pricing_columns, vendor_index)
+        _write_vendor_block_label(target_ws, revised_vendor.vendor_name, target_columns)
+        _copy_vendor_pricing(source_ws, target_ws, rows, revised_vendor, pricing_columns, target_columns)
         updated_any_sheet = True
 
     if not updated_any_sheet:

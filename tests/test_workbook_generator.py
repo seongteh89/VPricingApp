@@ -150,26 +150,37 @@ def test_export_workbook_creates_request_for_quotation_sheet(tmp_path, sample_or
     assert sheet.cell(sheet.max_row, 12).value == 37090.8
 
 
-def test_export_workbook_preserves_original_template_for_vendor_tabs(tmp_path, sample_original_rfq, sample_vendor_rfq):
+def test_template_preserved_export_keeps_original_sheet_and_adds_vendor_blocks_to_right(
+    tmp_path, sample_original_rfq, sample_vendor_rfq
+):
     original = parse_original_bq(sample_original_rfq)
-    vendor = parse_vendor_excel(sample_vendor_rfq, "T-Tech")
-    model = build_new_comparison(original, [vendor])
+    first_vendor = parse_vendor_excel(sample_vendor_rfq, "T-Tech")
+    second_vendor = parse_vendor_excel(sample_vendor_rfq, "YB")
+    model = build_new_comparison(original, [first_vendor, second_vendor])
 
     output_path = export_comparison_workbook(model, tmp_path, original_template_path=sample_original_rfq)
 
     wb = load_workbook(output_path, data_only=False)
     assert "Summary" in wb.sheetnames
-    assert "Request For Quotation - T-Tech" in wb.sheetnames
-    assert "Request For Quotation" not in wb.sheetnames
-    sheet = wb["Request For Quotation - T-Tech"]
+    assert "Request For Quotation" in wb.sheetnames
+    assert "Request For Quotation - T-Tech" not in wb.sheetnames
+    assert "Request For Quotation - YB" not in wb.sheetnames
+    sheet = wb["Request For Quotation"]
     assert sheet["C4"].value == "Request for Quotation"
     assert sheet["G13"].value == "Year 1"
+    assert sheet["O13"].value == "Total Amount"
     assert sheet["B15"].value == "No."
     assert sheet["C15"].value == "Description"
+    assert sheet["F12"].value == "T-Tech"
     assert sheet["G22"].value == 600
     assert sheet["H22"].value == 7200
     assert sheet["J22"].value == 618
     assert sheet["N22"].value == 7638.48
+    assert sheet["P12"].value == "YB"
+    assert sheet["Q22"].value == 600
+    assert sheet["R22"].value == 7200
+    assert sheet["T22"].value == 618
+    assert sheet["X22"].value == 7638.48
     assert wb["System Metadata"].sheet_state == "hidden"
 
 
@@ -182,26 +193,32 @@ def test_template_preserved_export_fills_parsed_pdf_vendor_prices(
 
     output_path = export_comparison_workbook(model, tmp_path, original_template_path=sample_original_bq)
 
-    sheet = load_workbook(output_path, data_only=False)["Package 1 - Rich"]
+    wb = load_workbook(output_path, data_only=False)
+    assert "PACKAGE 1 with Meter Run" in wb.sheetnames
+    assert "Package 1 - Rich" not in wb.sheetnames
+    sheet = wb["PACKAGE 1 with Meter Run"]
     assert sheet["B6"].value == "DESCRIPTION"
     assert sheet["G8"].value == 15
     assert sheet["I8"].value == 75
     assert sheet["J8"].value == 75
 
 
-def test_updated_template_workbook_preserves_vendor_tab_layout(tmp_path, sample_original_rfq, sample_vendor_rfq):
+def test_updated_template_workbook_updates_vendor_block_in_original_sheet(
+    tmp_path, sample_original_rfq, sample_vendor_rfq
+):
     original = parse_original_bq(sample_original_rfq)
-    vendor = parse_vendor_excel(sample_vendor_rfq, "T-Tech")
-    model = build_new_comparison(original, [vendor])
+    first_vendor = parse_vendor_excel(sample_vendor_rfq, "T-Tech")
+    second_vendor = parse_vendor_excel(sample_vendor_rfq, "YB")
+    model = build_new_comparison(original, [first_vendor, second_vendor])
     existing_output = export_comparison_workbook(model, tmp_path, original_template_path=sample_original_rfq)
 
-    revised_path = tmp_path / "SIN12 RFQ T-Tech R2.xlsx"
+    revised_path = tmp_path / "SIN12 RFQ YB R2.xlsx"
     revised_wb = load_workbook(sample_vendor_rfq)
     revised_ws = revised_wb["Request For Quotation"]
     revised_ws["G22"] = 700
     revised_ws["H22"] = "=F22*G22"
     revised_wb.save(revised_path)
-    revised_vendor = parse_vendor_excel(revised_path, "T-Tech")
+    revised_vendor = parse_vendor_excel(revised_path, "YB")
     updated_model = replace_vendor_quote(model, revised_vendor)
 
     updated_output = export_updated_template_workbook(
@@ -212,11 +229,15 @@ def test_updated_template_workbook_preserves_vendor_tab_layout(tmp_path, sample_
         revision="R2",
     )
 
-    sheet = load_workbook(updated_output, data_only=False)["Request For Quotation - T-Tech"]
+    wb = load_workbook(updated_output, data_only=False)
+    assert "Request For Quotation" in wb.sheetnames
+    assert "Request For Quotation - YB" not in wb.sheetnames
+    sheet = wb["Request For Quotation"]
     assert sheet["C4"].value == "Request for Quotation"
     assert sheet["G13"].value == "Year 1"
-    assert sheet["G22"].value == 700
-    assert sheet["H22"].value == "=F22*G22"
+    assert sheet["P12"].value == "YB"
+    assert sheet["Q22"].value == 700
+    assert sheet["R22"].value == "=P22*Q22"
 
 
 def test_export_workbook_splits_large_metadata_across_rows(tmp_path):
