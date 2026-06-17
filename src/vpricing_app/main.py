@@ -9,7 +9,11 @@ from vpricing_app.parsers.original_bq import parse_original_bq
 from vpricing_app.parsers.vendor_excel import parse_vendor_excel
 from vpricing_app.parsers.vendor_pdf import parse_vendor_pdf
 from vpricing_app.services.comparison_service import build_new_comparison, replace_vendor_quote
-from vpricing_app.services.workbook_generator import export_comparison_workbook, load_comparison_metadata
+from vpricing_app.services.workbook_generator import (
+    export_comparison_workbook,
+    export_updated_template_workbook,
+    load_comparison_metadata,
+)
 
 app = FastAPI(title="V Pricing Quote Comparison")
 
@@ -73,7 +77,7 @@ async def export_comparison(
         vendor_models = await _parse_vendor_uploads(vendors, vendor_names, tmp_path)
         comparison = build_new_comparison(original_model, vendor_models)
         output_dir = Path(gettempdir()) / "vpricing_exports"
-        output_path = export_comparison_workbook(comparison, output_dir)
+        output_path = export_comparison_workbook(comparison, output_dir, original_template_path=original_path)
         return FileResponse(
             output_path,
             media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -121,7 +125,13 @@ async def update_comparison(
         revised_model.revision = revision
         updated_model = replace_vendor_quote(existing_model, revised_model)
         output_dir = Path(gettempdir()) / "vpricing_exports"
-        output_path = export_comparison_workbook(updated_model, output_dir, revision=revision)
+        output_path = export_updated_template_workbook(
+            updated_model,
+            existing_path,
+            revised_model,
+            output_dir,
+            revision=revision,
+        )
         return FileResponse(
             output_path,
             media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",

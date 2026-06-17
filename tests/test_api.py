@@ -24,6 +24,9 @@ def test_index_page_contains_new_and_update_upload_controls():
     assert 'id="vendors"' in response.text
     assert 'id="existing-comparison"' in response.text
     assert 'id="revised-vendor-name"' in response.text
+    assert "Insert vendor names, e.g. T-Tech, YB" in response.text
+    assert "Insert revised vendor name" in response.text
+    assert "Insert revision, e.g. R2 or 2026-06-16" in response.text
 
 
 def test_new_comparison_endpoint_exports_workbook(sample_original_bq, sample_vendor_excel):

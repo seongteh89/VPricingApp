@@ -28,6 +28,7 @@ def parse_vendor_excel(path: str | Path, vendor_name: str) -> VendorQuote:
     quote = VendorQuote(
         vendor_name=vendor_name,
         source_filename=Path(path).name,
+        source_path=str(Path(path)),
         source_type=SourceType.EXCEL,
         is_official=False,
     )

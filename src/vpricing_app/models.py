@@ -88,6 +88,7 @@ class VendorQuote(BaseModel):
     vendor_name: str
     source_filename: str
     source_type: SourceType
+    source_path: str | None = None
     revision: str | None = None
     is_official: bool = False
     packages: dict[str, list[QuoteLine]] = Field(default_factory=dict)

@@ -4,10 +4,17 @@ from decimal import Decimal
 from pathlib import Path
 
 from openpyxl import Workbook, load_workbook
+from openpyxl.formula.translate import Translator
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
 from vpricing_app.models import ComparisonModel, Money, QuoteLine, VendorQuote
+from vpricing_app.parsers.original_bq import (
+    _all_header_columns,
+    _find_header_row,
+    _first_header_column,
+    _header_columns,
+)
 from vpricing_app.services.filename_builder import build_output_filename
 from vpricing_app.services.matcher import ComparisonRow, build_comparison_rows
 
@@ -208,11 +215,296 @@ def _autosize(ws) -> None:
         ws.column_dimensions[get_column_letter(column[0].column)].width = min(max(width + 2, 10), 45)
 
 
-def export_comparison_workbook(model: ComparisonModel, output_dir: str | Path, revision: str | None = None) -> Path:
+def _safe_sheet_title(base_title: str, existing_titles: set[str]) -> str:
+    cleaned = re.sub(r"[\[\]\*\?/\\:]", " ", base_title).strip() or "Sheet"
+    title = cleaned[:31]
+    counter = 1
+    while title in existing_titles:
+        suffix = f" {counter}"
+        title = f"{cleaned[: 31 - len(suffix)]}{suffix}"
+        counter += 1
+    existing_titles.add(title)
+    return title
+
+
+def _vendor_template_title(package_name: str, vendor_name: str, existing_titles: set[str]) -> str:
+    package_number = _package_number(package_name)
+    if package_number is not None:
+        return _safe_sheet_title(f"Package {package_number} - {vendor_name}", existing_titles)
+    preferred = f"{package_name} - {vendor_name}"
+    if len(preferred) <= 31:
+        return _safe_sheet_title(preferred, existing_titles)
+    abbreviated_package = re.sub(r"\bRequest\s+For\s+Quotation\b", "RFQ", package_name, flags=re.IGNORECASE)
+    abbreviated_package = re.sub(r"\bQuotation\b", "Quote", abbreviated_package, flags=re.IGNORECASE)
+    preferred = f"{abbreviated_package} - {vendor_name}"
+    return _safe_sheet_title(preferred, existing_titles)
+
+
+def _package_number(name: str) -> str | None:
+    match = re.search(r"package\s*(\d+)", name, flags=re.IGNORECASE)
+    return match.group(1) if match else None
+
+
+def _worksheet_for_package(wb, package_name: str):
+    if package_name in wb.sheetnames:
+        return wb[package_name]
+    package_number = _package_number(package_name)
+    if package_number is not None:
+        for ws in wb.worksheets:
+            if _package_number(ws.title) == package_number:
+                return ws
+    return None
+
+
+def _worksheet_for_vendor_package(wb, package_name: str, vendor_name: str):
+    exact_titles = [f"{package_name} - {vendor_name}"]
+    package_number = _package_number(package_name)
+    if package_number is not None:
+        exact_titles.append(f"Package {package_number} - {vendor_name}")
+    for title in exact_titles:
+        if title in wb.sheetnames:
+            return wb[title]
+
+    normalized_vendor = vendor_name.casefold()
+    for ws in wb.worksheets:
+        if normalized_vendor not in ws.title.casefold():
+            continue
+        if package_number is None or _package_number(ws.title) == package_number:
+            return ws
+    return None
+
+
+def _pricing_columns(ws) -> list[int]:
+    header_row = _find_header_row(ws)
+    if header_row is None:
+        return []
+    headers = _header_columns(ws, header_row)
+    pricing_candidates = [
+        _first_header_column(headers, "revised quantity"),
+        _first_header_column(headers, "unit"),
+        _first_header_column(headers, "material rate"),
+        _first_header_column(headers, "labor rate"),
+        _first_header_column(headers, "total material cost", "material total"),
+        _first_header_column(headers, "total labor cost", "labor total"),
+        _first_header_column(headers, "total cost", "total"),
+        *_all_header_columns(headers, "number of servicing"),
+        *_all_header_columns(headers, "unit price"),
+        *_all_header_columns(headers, "amount"),
+    ]
+    columns = [column for column in pricing_candidates if column is not None]
+    if not columns:
+        return []
+    return list(range(min(columns), max(columns) + 1))
+
+
+def _pricing_column_map(ws) -> dict[str, int | list[int] | None]:
+    header_row = _find_header_row(ws)
+    if header_row is None:
+        return {}
+    headers = _header_columns(ws, header_row)
+    return {
+        "revised_quantity": _first_header_column(headers, "revised quantity", "number of servicing"),
+        "unit": _first_header_column(headers, "unit"),
+        "material_rate": _first_header_column(headers, "material rate"),
+        "labor_rate": _first_header_column(headers, "labor rate"),
+        "material_total": _first_header_column(headers, "total material cost", "material total"),
+        "labor_total": _first_header_column(headers, "total labor cost", "labor total"),
+        "total": _first_header_column(headers, "total cost", "total"),
+        "service_cols": _all_header_columns(headers, "number of servicing"),
+        "unit_price_cols": _all_header_columns(headers, "unit price"),
+        "amount_cols": _all_header_columns(headers, "amount"),
+    }
+
+
+def _write_cell_if_column(ws, row_number: int, column: int | None, value) -> None:
+    if column is not None and value is not None:
+        ws.cell(row_number, column).value = _as_float(value) if isinstance(value, Decimal) else value
+
+
+def _write_parsed_pricing(target_ws, target_row: int, line: QuoteLine, pricing_map: dict[str, int | list[int] | None]) -> None:
+    service_cols = pricing_map.get("service_cols") or []
+    unit_price_cols = pricing_map.get("unit_price_cols") or []
+    amount_cols = pricing_map.get("amount_cols") or []
+    if isinstance(service_cols, list) and isinstance(unit_price_cols, list) and isinstance(amount_cols, list) and amount_cols:
+        _write_cell_if_column(target_ws, target_row, service_cols[0] if service_cols else None, line.revised_quantity)
+        _write_cell_if_column(target_ws, target_row, unit_price_cols[0] if unit_price_cols else None, line.material_rate)
+        _write_cell_if_column(target_ws, target_row, amount_cols[0], line.material_total)
+        if len(unit_price_cols) > 1:
+            _write_cell_if_column(target_ws, target_row, unit_price_cols[1], line.labor_rate)
+        if len(amount_cols) > 1:
+            _write_cell_if_column(target_ws, target_row, amount_cols[1], line.labor_total)
+        if len(amount_cols) > 2:
+            _write_cell_if_column(target_ws, target_row, amount_cols[-1], line.total)
+        return
+
+    _write_cell_if_column(target_ws, target_row, pricing_map.get("revised_quantity"), line.revised_quantity)
+    _write_cell_if_column(target_ws, target_row, pricing_map.get("unit"), line.unit)
+    _write_cell_if_column(target_ws, target_row, pricing_map.get("material_rate"), line.material_rate)
+    _write_cell_if_column(target_ws, target_row, pricing_map.get("labor_rate"), line.labor_rate)
+    _write_cell_if_column(target_ws, target_row, pricing_map.get("material_total"), line.material_total)
+    _write_cell_if_column(target_ws, target_row, pricing_map.get("labor_total"), line.labor_total)
+    _write_cell_if_column(target_ws, target_row, pricing_map.get("total"), line.total)
+
+
+def _copy_pricing_cell(source_ws, source_row: int, target_ws, target_row: int, column: int) -> None:
+    source = source_ws.cell(source_row, column)
+    target = target_ws.cell(target_row, column)
+    if isinstance(source.value, str) and source.value.startswith("="):
+        try:
+            target.value = Translator(source.value, origin=source.coordinate).translate_formula(target.coordinate)
+        except Exception:
+            target.value = source.value
+    else:
+        target.value = source.value
+
+
+def _copy_vendor_pricing(source_ws, target_ws, rows: list[ComparisonRow], vendor: VendorQuote, pricing_columns: list[int]) -> None:
+    pricing_map = _pricing_column_map(target_ws)
+    for row in rows:
+        vendor_line = row.vendor_lines.get(vendor.vendor_name)
+        if vendor_line is None:
+            continue
+        target_row = row.original_line.source_row if row.original_line and row.original_line.source_row else vendor_line.source_row
+        if target_row is None:
+            continue
+        if source_ws is not None and pricing_columns:
+            if vendor_line.source_row is None:
+                _write_parsed_pricing(target_ws, target_row, vendor_line, pricing_map)
+                continue
+            for column in pricing_columns:
+                _copy_pricing_cell(source_ws, vendor_line.source_row, target_ws, target_row, column)
+        else:
+            _write_parsed_pricing(target_ws, target_row, vendor_line, pricing_map)
+
+
+def _replace_sheet(wb, title: str):
+    if title in wb.sheetnames:
+        del wb[title]
+    return wb.create_sheet(title)
+
+
+def _write_change_log_sheet(wb, model: ComparisonModel) -> None:
+    change_log = _replace_sheet(wb, "Change Log")
+    change_log.append(["Level", "Code", "Vendor", "Package", "Row", "Message"])
+    for warning in model.warnings:
+        change_log.append(
+            [warning.level.value, warning.code, warning.vendor_name, warning.package, warning.row_label, warning.message]
+        )
+    _autosize(change_log)
+
+
+def _write_import_warnings_sheet(wb, model: ComparisonModel) -> None:
+    warnings = _replace_sheet(wb, "Import Warnings")
+    warnings.append(["Level", "Code", "Vendor", "Package", "Message"])
+    for warning in model.warnings:
+        warnings.append([warning.level.value, warning.code, warning.vendor_name, warning.package, warning.message])
+    _autosize(warnings)
+
+
+def _write_metadata_sheet(wb, model: ComparisonModel) -> None:
+    metadata = _replace_sheet(wb, "System Metadata")
+    metadata.sheet_state = "hidden"
+    metadata["A1"] = METADATA_MARKER
+    raw_metadata = model.model_dump_json()
+    for index in range(0, len(raw_metadata), METADATA_CHUNK_SIZE):
+        row = index // METADATA_CHUNK_SIZE + 2
+        metadata.cell(row=row, column=1).value = raw_metadata[index : index + METADATA_CHUNK_SIZE]
+
+
+def _write_support_sheets(wb, model: ComparisonModel) -> None:
+    _write_change_log_sheet(wb, model)
+    _write_import_warnings_sheet(wb, model)
+    _write_metadata_sheet(wb, model)
+
+
+def _export_template_preserved_workbook(
+    model: ComparisonModel,
+    output_path: Path,
+    original_template_path: str | Path,
+) -> Path:
+    wb = load_workbook(original_template_path)
+    existing_titles = set(wb.sheetnames)
+    rows_by_package = build_comparison_rows(model.original, model.vendors)
+
+    for package_name, rows in rows_by_package.items():
+        template_ws = _worksheet_for_package(wb, package_name)
+        if template_ws is None:
+            continue
+        pricing_columns = _pricing_columns(template_ws)
+        for vendor in model.vendors:
+            vendor_ws = wb.copy_worksheet(template_ws)
+            vendor_ws.title = _vendor_template_title(package_name, vendor.vendor_name, existing_titles)
+            source_ws = None
+            if vendor.source_path:
+                vendor_wb = load_workbook(vendor.source_path, data_only=False)
+                source_ws = _worksheet_for_package(vendor_wb, package_name)
+            _copy_vendor_pricing(source_ws, vendor_ws, rows, vendor, pricing_columns)
+
+    for package_name in rows_by_package:
+        if package_name in wb.sheetnames:
+            del wb[package_name]
+
+    if "Summary" in wb.sheetnames:
+        del wb["Summary"]
+    summary = wb.create_sheet("Summary", 0)
+    _write_summary(summary, model)
+    _autosize(summary)
+    _write_support_sheets(wb, model)
+    wb.save(output_path)
+    return output_path
+
+
+def export_updated_template_workbook(
+    model: ComparisonModel,
+    existing_comparison_path: str | Path,
+    revised_vendor: VendorQuote,
+    output_dir: str | Path,
+    revision: str | None = None,
+) -> Path:
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     filename = build_output_filename(model.project_name, [vendor.vendor_name for vendor in model.vendors], revision)
     output_path = output_dir / filename
+
+    wb = load_workbook(existing_comparison_path)
+    rows_by_package = build_comparison_rows(model.original, model.vendors)
+    source_wb = load_workbook(revised_vendor.source_path, data_only=False) if revised_vendor.source_path else None
+    updated_any_sheet = False
+
+    for package_name, rows in rows_by_package.items():
+        target_ws = _worksheet_for_vendor_package(wb, package_name, revised_vendor.vendor_name)
+        if target_ws is None:
+            continue
+        source_ws = _worksheet_for_package(source_wb, package_name) if source_wb is not None else None
+        _copy_vendor_pricing(source_ws, target_ws, rows, revised_vendor, _pricing_columns(target_ws))
+        updated_any_sheet = True
+
+    if not updated_any_sheet:
+        return export_comparison_workbook(model, output_dir, revision=revision)
+
+    if "Summary" in wb.sheetnames:
+        del wb["Summary"]
+    summary = wb.create_sheet("Summary", 0)
+    _write_summary(summary, model)
+    _autosize(summary)
+    _write_support_sheets(wb, model)
+    wb.save(output_path)
+    return output_path
+
+
+def export_comparison_workbook(
+    model: ComparisonModel,
+    output_dir: str | Path,
+    revision: str | None = None,
+    original_template_path: str | Path | None = None,
+) -> Path:
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    filename = build_output_filename(model.project_name, [vendor.vendor_name for vendor in model.vendors], revision)
+    output_path = output_dir / filename
+
+    if original_template_path is not None:
+        return _export_template_preserved_workbook(model, output_path, original_template_path)
 
     wb = Workbook()
     summary = wb.active
@@ -289,27 +581,7 @@ def export_comparison_workbook(model: ComparisonModel, output_dir: str | Path, r
         _write_package_total_row(ws, package_name, model.vendors)
         _autosize(ws)
 
-    change_log = wb.create_sheet("Change Log")
-    change_log.append(["Level", "Code", "Vendor", "Package", "Row", "Message"])
-    for warning in model.warnings:
-        change_log.append(
-            [warning.level.value, warning.code, warning.vendor_name, warning.package, warning.row_label, warning.message]
-        )
-    _autosize(change_log)
-
-    warnings = wb.create_sheet("Import Warnings")
-    warnings.append(["Level", "Code", "Vendor", "Package", "Message"])
-    for warning in model.warnings:
-        warnings.append([warning.level.value, warning.code, warning.vendor_name, warning.package, warning.message])
-    _autosize(warnings)
-
-    metadata = wb.create_sheet("System Metadata")
-    metadata.sheet_state = "hidden"
-    metadata["A1"] = METADATA_MARKER
-    raw_metadata = model.model_dump_json()
-    for index in range(0, len(raw_metadata), METADATA_CHUNK_SIZE):
-        row = index // METADATA_CHUNK_SIZE + 2
-        metadata.cell(row=row, column=1).value = raw_metadata[index : index + METADATA_CHUNK_SIZE]
+    _write_support_sheets(wb, model)
 
     wb.save(output_path)
     return output_path

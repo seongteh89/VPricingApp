@@ -6,8 +6,13 @@ from vpricing_app.models import ComparisonModel, Money, OriginalBQ, QuoteLine, S
 from vpricing_app.services.filename_builder import build_output_filename
 from vpricing_app.parsers.original_bq import parse_original_bq
 from vpricing_app.parsers.vendor_excel import parse_vendor_excel
+from vpricing_app.parsers.vendor_pdf import parse_vendor_pdf
 from vpricing_app.services.comparison_service import build_new_comparison, replace_vendor_quote
-from vpricing_app.services.workbook_generator import export_comparison_workbook, load_comparison_metadata
+from vpricing_app.services.workbook_generator import (
+    export_comparison_workbook,
+    export_updated_template_workbook,
+    load_comparison_metadata,
+)
 
 
 def test_build_output_filename_includes_vendor_names():
@@ -143,6 +148,75 @@ def test_export_workbook_creates_request_for_quotation_sheet(tmp_path, sample_or
     assert sheet["B2"].value == "PBB : Automatic Fire Sprinkler System"
     assert sheet.cell(sheet.max_row, 1).value == "GRAND TOTAL"
     assert sheet.cell(sheet.max_row, 12).value == 37090.8
+
+
+def test_export_workbook_preserves_original_template_for_vendor_tabs(tmp_path, sample_original_rfq, sample_vendor_rfq):
+    original = parse_original_bq(sample_original_rfq)
+    vendor = parse_vendor_excel(sample_vendor_rfq, "T-Tech")
+    model = build_new_comparison(original, [vendor])
+
+    output_path = export_comparison_workbook(model, tmp_path, original_template_path=sample_original_rfq)
+
+    wb = load_workbook(output_path, data_only=False)
+    assert "Summary" in wb.sheetnames
+    assert "Request For Quotation - T-Tech" in wb.sheetnames
+    assert "Request For Quotation" not in wb.sheetnames
+    sheet = wb["Request For Quotation - T-Tech"]
+    assert sheet["C4"].value == "Request for Quotation"
+    assert sheet["G13"].value == "Year 1"
+    assert sheet["B15"].value == "No."
+    assert sheet["C15"].value == "Description"
+    assert sheet["G22"].value == 600
+    assert sheet["H22"].value == 7200
+    assert sheet["J22"].value == 618
+    assert sheet["N22"].value == 7638.48
+    assert wb["System Metadata"].sheet_state == "hidden"
+
+
+def test_template_preserved_export_fills_parsed_pdf_vendor_prices(
+    tmp_path, sample_original_bq, sample_vendor_pdf_bq_layout
+):
+    original = parse_original_bq(sample_original_bq)
+    vendor = parse_vendor_pdf(sample_vendor_pdf_bq_layout, "Rich")
+    model = build_new_comparison(original, [vendor])
+
+    output_path = export_comparison_workbook(model, tmp_path, original_template_path=sample_original_bq)
+
+    sheet = load_workbook(output_path, data_only=False)["Package 1 - Rich"]
+    assert sheet["B6"].value == "DESCRIPTION"
+    assert sheet["G8"].value == 15
+    assert sheet["I8"].value == 75
+    assert sheet["J8"].value == 75
+
+
+def test_updated_template_workbook_preserves_vendor_tab_layout(tmp_path, sample_original_rfq, sample_vendor_rfq):
+    original = parse_original_bq(sample_original_rfq)
+    vendor = parse_vendor_excel(sample_vendor_rfq, "T-Tech")
+    model = build_new_comparison(original, [vendor])
+    existing_output = export_comparison_workbook(model, tmp_path, original_template_path=sample_original_rfq)
+
+    revised_path = tmp_path / "SIN12 RFQ T-Tech R2.xlsx"
+    revised_wb = load_workbook(sample_vendor_rfq)
+    revised_ws = revised_wb["Request For Quotation"]
+    revised_ws["G22"] = 700
+    revised_ws["H22"] = "=F22*G22"
+    revised_wb.save(revised_path)
+    revised_vendor = parse_vendor_excel(revised_path, "T-Tech")
+    updated_model = replace_vendor_quote(model, revised_vendor)
+
+    updated_output = export_updated_template_workbook(
+        updated_model,
+        existing_output,
+        revised_vendor,
+        tmp_path,
+        revision="R2",
+    )
+
+    sheet = load_workbook(updated_output, data_only=False)["Request For Quotation - T-Tech"]
+    assert sheet["C4"].value == "Request for Quotation"
+    assert sheet["G13"].value == "Year 1"
+    assert sheet["G22"].value == 700
+    assert sheet["H22"].value == "=F22*G22"
 
 
 def test_export_workbook_splits_large_metadata_across_rows(tmp_path):
