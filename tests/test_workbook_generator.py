@@ -1,0 +1,278 @@
+from decimal import Decimal
+
+from openpyxl import load_workbook
+
+from vpricing_app.models import ComparisonModel, Money, OriginalBQ, QuoteLine, SourceType, VendorQuote
+from vpricing_app.services.filename_builder import build_output_filename
+from vpricing_app.parsers.original_bq import parse_original_bq
+from vpricing_app.parsers.vendor_excel import parse_vendor_excel
+from vpricing_app.parsers.vendor_pdf import parse_vendor_pdf
+from vpricing_app.services.comparison_service import build_new_comparison, replace_vendor_quote
+from vpricing_app.services.workbook_generator import (
+    export_comparison_workbook,
+    export_updated_template_workbook,
+    load_comparison_metadata,
+)
+
+
+def test_build_output_filename_includes_vendor_names():
+    filename = build_output_filename(
+        project_name="#Fire#AstraZeneca_F26B Fire Alarm System@Tuas South Ave",
+        vendor_names=["Rensar", "E-Tech", "Rich"],
+        revision=None,
+    )
+
+    assert filename.startswith("Quote Comparison - Fire AstraZeneca_F26B")
+    assert "Rensar vs E-Tech vs Rich" in filename
+    assert filename.endswith(".xlsx")
+
+
+def test_build_output_filename_includes_revision_for_update():
+    filename = build_output_filename("Sample Project", ["Rich"], revision="2026-06-16")
+
+    assert filename == "Quote Comparison - Sample Project - Rich - Rev 2026-06-16.xlsx"
+
+
+def test_export_workbook_contains_vendor_blocks_summary_and_metadata(tmp_path):
+    original_line = QuoteLine(
+        package="Package 1",
+        section="A",
+        section_description="ADDRESSABLE FIRE ALARM SYSTEM",
+        item_no="1",
+        description="Sub Alarm Panel",
+        quantity=Decimal("5"),
+        revised_quantity=Decimal("5"),
+        unit="Nos",
+    )
+    vendor_line = original_line.model_copy(
+        update={"labor_rate": Decimal("20"), "labor_total": Decimal("100"), "total": Decimal("100")}
+    )
+    original = OriginalBQ(project_name="Sample Project", source_filename="original.xlsx", packages={"Package 1": [original_line]})
+    vendor = VendorQuote(
+        vendor_name="Rich",
+        source_filename="rich.pdf",
+        source_type=SourceType.PDF,
+        packages={"Package 1": [vendor_line]},
+        package_totals={"Package 1": Money(total=Decimal("100"))},
+    )
+    model = ComparisonModel(project_name="Sample Project", original=original, vendors=[vendor])
+
+    output_path = export_comparison_workbook(model, tmp_path)
+
+    assert output_path.name == "Quote Comparison - Sample Project - Rich.xlsx"
+    wb = load_workbook(output_path, data_only=False)
+    assert "Summary" in wb.sheetnames
+    assert "Package 1" in wb.sheetnames
+    assert "Change Log" in wb.sheetnames
+    assert "Import Warnings" in wb.sheetnames
+    assert "System Metadata" in wb.sheetnames
+    assert wb["System Metadata"].sheet_state == "hidden"
+    summary = wb["Summary"]
+    assert summary["B4"].value == "show Total Amount of each Vendor"
+    assert summary["C5"].value == "Rich"
+    assert summary["B6"].value == "package 1"
+    assert summary["C6"].value == 100
+    assert summary["B7"].value == "Total Package Amount"
+    assert summary["C7"].value == 100
+    package = wb["Package 1"]
+    assert package["A2"].value == "A"
+    assert package["B2"].value == "ADDRESSABLE FIRE ALARM SYSTEM"
+    assert package["J2"].value == "=SUM(J3:J3)"
+    assert package["K2"].value == "=SUM(K3:K3)"
+    assert package["L2"].value == "=SUM(L3:L3)"
+    assert package.cell(package.max_row, 1).value == "GRAND TOTAL"
+    assert package.cell(package.max_row, 10).value == 0
+    assert package.cell(package.max_row, 11).value == 0
+    assert package.cell(package.max_row, 12).value == 100
+    assert package.cell(package.max_row, 12).fill.fgColor.rgb == "FFD9D9D9"
+    metadata = load_comparison_metadata(output_path)
+    assert metadata.project_name == "Sample Project"
+    assert metadata.vendors[0].vendor_name == "Rich"
+
+
+def test_export_workbook_section_subtotal_formulas_cover_each_vendor(tmp_path):
+    original_line = QuoteLine(
+        package="Package 1",
+        section="A",
+        section_description="ADDRESSABLE FIRE ALARM SYSTEM",
+        item_no="1",
+        description="Sub Alarm Panel",
+        quantity=Decimal("5"),
+        revised_quantity=Decimal("5"),
+        unit="Nos",
+    )
+    rich_line = original_line.model_copy(
+        update={"labor_rate": Decimal("20"), "labor_total": Decimal("100"), "total": Decimal("100")}
+    )
+    rensar_line = original_line.model_copy(
+        update={"labor_rate": Decimal("30"), "labor_total": Decimal("150"), "total": Decimal("150")}
+    )
+    original = OriginalBQ(project_name="Sample Project", source_filename="original.xlsx", packages={"Package 1": [original_line]})
+    rich = VendorQuote(
+        vendor_name="Rich",
+        source_filename="rich.pdf",
+        source_type=SourceType.PDF,
+        packages={"Package 1": [rich_line]},
+        package_totals={"Package 1": Money(total=Decimal("100"))},
+    )
+    rensar = VendorQuote(
+        vendor_name="Rensar",
+        source_filename="rensar.pdf",
+        source_type=SourceType.PDF,
+        packages={"Package 1": [rensar_line]},
+        package_totals={"Package 1": Money(total=Decimal("150"))},
+    )
+    model = ComparisonModel(project_name="Sample Project", original=original, vendors=[rich, rensar])
+
+    output_path = export_comparison_workbook(model, tmp_path)
+
+    package = load_workbook(output_path, data_only=False)["Package 1"]
+    assert package["J2"].value == "=SUM(J3:J3)"
+    assert package["K2"].value == "=SUM(K3:K3)"
+    assert package["L2"].value == "=SUM(L3:L3)"
+    assert package["R2"].value == "=SUM(R3:R3)"
+    assert package["S2"].value == "=SUM(S3:S3)"
+    assert package["T2"].value == "=SUM(T3:T3)"
+
+
+def test_export_workbook_creates_request_for_quotation_sheet(tmp_path, sample_original_rfq, sample_vendor_rfq):
+    original = parse_original_bq(sample_original_rfq)
+    vendor = parse_vendor_excel(sample_vendor_rfq, "T-Tech")
+    model = build_new_comparison(original, [vendor])
+
+    output_path = export_comparison_workbook(model, tmp_path)
+
+    wb = load_workbook(output_path, data_only=False)
+    assert "Request For Quotation" in wb.sheetnames
+    sheet = wb["Request For Quotation"]
+    assert sheet["B2"].value == "PBB : Automatic Fire Sprinkler System"
+    assert sheet.cell(sheet.max_row, 1).value == "GRAND TOTAL"
+    assert sheet.cell(sheet.max_row, 12).value == 37090.8
+
+
+def test_template_preserved_export_keeps_original_sheet_and_adds_vendor_blocks_to_right(
+    tmp_path, sample_original_rfq, sample_vendor_rfq
+):
+    original = parse_original_bq(sample_original_rfq)
+    first_vendor = parse_vendor_excel(sample_vendor_rfq, "T-Tech")
+    second_vendor = parse_vendor_excel(sample_vendor_rfq, "YB")
+    model = build_new_comparison(original, [first_vendor, second_vendor])
+
+    output_path = export_comparison_workbook(model, tmp_path, original_template_path=sample_original_rfq)
+
+    wb = load_workbook(output_path, data_only=False)
+    assert "Summary" in wb.sheetnames
+    assert "Request For Quotation" in wb.sheetnames
+    assert "Request For Quotation - T-Tech" not in wb.sheetnames
+    assert "Request For Quotation - YB" not in wb.sheetnames
+    sheet = wb["Request For Quotation"]
+    assert sheet["C4"].value == "Request for Quotation"
+    assert sheet["G13"].value == "Year 1"
+    assert sheet["O13"].value == "Total Amount"
+    assert sheet["B15"].value == "No."
+    assert sheet["C15"].value == "Description"
+    assert sheet["F12"].value == "T-Tech"
+    assert sheet["G22"].value == 600
+    assert sheet["H22"].value == 7200
+    assert sheet["J22"].value == 618
+    assert sheet["N22"].value == 7638.48
+    assert sheet["P12"].value == "YB"
+    assert sheet["Q22"].value == 600
+    assert sheet["R22"].value == 7200
+    assert sheet["T22"].value == 618
+    assert sheet["X22"].value == 7638.48
+    assert wb["System Metadata"].sheet_state == "hidden"
+
+
+def test_template_preserved_export_fills_parsed_pdf_vendor_prices(
+    tmp_path, sample_original_bq, sample_vendor_pdf_bq_layout
+):
+    original = parse_original_bq(sample_original_bq)
+    vendor = parse_vendor_pdf(sample_vendor_pdf_bq_layout, "Rich")
+    model = build_new_comparison(original, [vendor])
+
+    output_path = export_comparison_workbook(model, tmp_path, original_template_path=sample_original_bq)
+
+    wb = load_workbook(output_path, data_only=False)
+    assert "PACKAGE 1 with Meter Run" in wb.sheetnames
+    assert "Package 1 - Rich" not in wb.sheetnames
+    sheet = wb["PACKAGE 1 with Meter Run"]
+    assert sheet["B6"].value == "DESCRIPTION"
+    assert sheet["G8"].value == 15
+    assert sheet["I8"].value == 75
+    assert sheet["J8"].value == 75
+
+
+def test_updated_template_workbook_updates_vendor_block_in_original_sheet(
+    tmp_path, sample_original_rfq, sample_vendor_rfq
+):
+    original = parse_original_bq(sample_original_rfq)
+    first_vendor = parse_vendor_excel(sample_vendor_rfq, "T-Tech")
+    second_vendor = parse_vendor_excel(sample_vendor_rfq, "YB")
+    model = build_new_comparison(original, [first_vendor, second_vendor])
+    existing_output = export_comparison_workbook(model, tmp_path, original_template_path=sample_original_rfq)
+
+    revised_path = tmp_path / "SIN12 RFQ YB R2.xlsx"
+    revised_wb = load_workbook(sample_vendor_rfq)
+    revised_ws = revised_wb["Request For Quotation"]
+    revised_ws["G22"] = 700
+    revised_ws["H22"] = "=F22*G22"
+    revised_wb.save(revised_path)
+    revised_vendor = parse_vendor_excel(revised_path, "YB")
+    updated_model = replace_vendor_quote(model, revised_vendor)
+
+    updated_output = export_updated_template_workbook(
+        updated_model,
+        existing_output,
+        revised_vendor,
+        tmp_path,
+        revision="R2",
+    )
+
+    wb = load_workbook(updated_output, data_only=False)
+    assert "Request For Quotation" in wb.sheetnames
+    assert "Request For Quotation - YB" not in wb.sheetnames
+    sheet = wb["Request For Quotation"]
+    assert sheet["C4"].value == "Request for Quotation"
+    assert sheet["G13"].value == "Year 1"
+    assert sheet["P12"].value == "YB"
+    assert sheet["Q22"].value == 700
+    assert sheet["R22"].value == "=P22*Q22"
+
+
+def test_export_workbook_splits_large_metadata_across_rows(tmp_path):
+    lines = [
+        QuoteLine(
+            package="Package 1",
+            section="A",
+            item_no=str(index),
+            description=f"Long description {index} " + ("x" * 120),
+            quantity=Decimal("1"),
+            revised_quantity=Decimal("1"),
+            unit="Lot",
+        )
+        for index in range(500)
+    ]
+    original = OriginalBQ(project_name="Sample Project", source_filename="original.xlsx", packages={"Package 1": lines})
+    vendor = VendorQuote(vendor_name="Rich", source_filename="rich.pdf", source_type=SourceType.PDF)
+    model = ComparisonModel(project_name="Sample Project", original=original, vendors=[vendor])
+
+    output_path = export_comparison_workbook(model, tmp_path)
+    metadata = load_comparison_metadata(output_path)
+
+    assert len(metadata.original.packages["Package 1"]) == 500
+
+
+def test_replace_vendor_quote_preserves_other_vendors():
+    original = OriginalBQ(project_name="Sample Project", source_filename="original.xlsx", packages={"Package 1": []})
+    first = VendorQuote(vendor_name="Rich", source_filename="rich-r1.pdf", source_type=SourceType.PDF, revision="R1")
+    second = VendorQuote(vendor_name="Rensar", source_filename="rensar.pdf", source_type=SourceType.EXCEL)
+    revised = VendorQuote(vendor_name="Rich", source_filename="rich-r2.pdf", source_type=SourceType.PDF, revision="R2")
+    model = ComparisonModel(project_name="Sample Project", original=original, vendors=[first, second])
+
+    updated = replace_vendor_quote(model, revised)
+
+    assert [vendor.vendor_name for vendor in updated.vendors] == ["Rich", "Rensar"]
+    assert updated.vendors[0].source_filename == "rich-r2.pdf"
+    assert updated.vendors[0].revision == "R2"
+    assert updated.vendors[1].source_filename == "rensar.pdf"
